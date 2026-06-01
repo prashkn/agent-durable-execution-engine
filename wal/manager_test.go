@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -58,6 +59,67 @@ func TestManagerEndToEnd(t *testing.T) {
 		}
 		if !bytes.Equal(got[i].Payload, records[i].Payload) {
 			t.Fatalf("record %d: payload mismatch (got=%q want=%q)", i, got[i].Payload, records[i].Payload)
+		}
+	}
+}
+
+func TestManagerReplayStopsAtCorruptRecord(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.log")
+
+	// Fixed-width payloads make on-disk offsets deterministic, so we can corrupt a
+	// known record. Each frame is RecordHeaderSize + len(payload) bytes.
+	const n = 8
+	const payloadLen = 6
+	recordSize := RecordHeaderSize + payloadLen
+
+	m1, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager #1: %v", err)
+	}
+	for i := 0; i < n; i++ {
+		if err := m1.Append(Record{Type: RecordTypeRaw, Payload: []byte(fmt.Sprintf("rec-%02d", i))}); err != nil {
+			t.Fatalf("Append #%d: %v", i, err)
+		}
+	}
+	if err := m1.Close(); err != nil {
+		t.Fatalf("Close #1: %v", err)
+	}
+
+	// Corrupt a byte inside record index 3's payload, as a hex editor would.
+	const badIdx = 3
+	corruptOffset := badIdx*recordSize + RecordHeaderSize
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	data[corruptOffset] ^= 0xFF
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m2, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager #2: %v", err)
+	}
+	defer m2.Close()
+
+	var got []Record
+	err = m2.Replay(func(r Record) error {
+		got = append(got, r)
+		return nil
+	})
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("Replay: err = %v, want ErrCorruptRecord", err)
+	}
+	// Every record before the corrupt one is delivered; nothing at or past it is.
+	if len(got) != badIdx {
+		t.Fatalf("delivered %d records before corruption, want %d", len(got), badIdx)
+	}
+	for i := range got {
+		want := []byte(fmt.Sprintf("rec-%02d", i))
+		if !bytes.Equal(got[i].Payload, want) {
+			t.Fatalf("record %d: payload = %q, want %q", i, got[i].Payload, want)
 		}
 	}
 }

@@ -35,6 +35,13 @@ func (m *Manager) Replay(fn func(Record) error) error {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
+		// Corruption (bad CRC or malformed framing) halts replay at the first bad
+		// record: every good record before it has already been delivered to fn, but
+		// nothing past it is trusted. Surfacing the error keeps the "no silent
+		// corruption" invariant; reclaiming the log by truncation is L3's job.
+		if errors.Is(err, ErrCorruptRecord) {
+			return fmt.Errorf("wal: replay stopped at corrupt record: %w", err)
+		}
 		if err != nil {
 			return fmt.Errorf("wal: read during replay: %w", err)
 		}

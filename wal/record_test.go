@@ -4,9 +4,21 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"io"
 	"testing"
 )
+
+// frame builds a valid on-disk record frame with a correct CRC, for tests that
+// then deliberately corrupt or truncate it.
+func frame(typ uint8, payload []byte) []byte {
+	rec := Record{Type: typ, Payload: payload}
+	encoded, err := rec.Encode()
+	if err != nil {
+		panic(err)
+	}
+	return encoded
+}
 
 func TestRecordRoundTrip(t *testing.T) {
 	cases := []struct {
@@ -32,14 +44,21 @@ func TestRecordRoundTrip(t *testing.T) {
 				t.Fatalf("encoded length = %d, want %d", len(encoded), wantSize)
 			}
 
-			gotLen := binary.LittleEndian.Uint32(encoded[0:4])
+			gotLen := binary.LittleEndian.Uint32(encoded[0:LengthFieldSize])
 			wantLen := uint32(1 + len(tc.rec.Payload))
 			if gotLen != wantLen {
 				t.Fatalf("length field = %d, want %d", gotLen, wantLen)
 			}
 
-			if encoded[4] != tc.rec.Type {
-				t.Fatalf("type byte = 0x%02x, want 0x%02x", encoded[4], tc.rec.Type)
+			// Body = [type][payload]; the CRC field must match a fresh checksum of it.
+			body := encoded[LengthFieldSize+CRCFieldSize:]
+			gotCRC := binary.LittleEndian.Uint32(encoded[LengthFieldSize : LengthFieldSize+CRCFieldSize])
+			if wantCRC := crc32.ChecksumIEEE(body); gotCRC != wantCRC {
+				t.Fatalf("crc field = 0x%08x, want 0x%08x", gotCRC, wantCRC)
+			}
+
+			if body[0] != tc.rec.Type {
+				t.Fatalf("type byte = 0x%02x, want 0x%02x", body[0], tc.rec.Type)
 			}
 
 			decoded, err := DecodeRecord(bytes.NewReader(encoded))
@@ -71,23 +90,59 @@ func TestDecodeTruncatedHeaderReturnsUnexpectedEOF(t *testing.T) {
 }
 
 func TestDecodeTruncatedPayloadReturnsUnexpectedEOF(t *testing.T) {
-	buf := make([]byte, 0, 8)
-	var header [4]byte
-	binary.LittleEndian.PutUint32(header[:], 10) // body = 1 type + 9 payload
-	buf = append(buf, header[:]...)
-	buf = append(buf, RecordTypeRaw)
-	buf = append(buf, 0x01, 0x02, 0x03)
-	_, err := DecodeRecord(bytes.NewReader(buf))
+	// A complete frame with a 9-byte payload, cut so only 3 payload bytes survive.
+	full := frame(RecordTypeRaw, []byte{0, 1, 2, 3, 4, 5, 6, 7, 8})
+	truncated := full[:RecordHeaderSize+3]
+	_, err := DecodeRecord(bytes.NewReader(truncated))
 	if !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("DecodeRecord on truncated payload: err = %v, want io.ErrUnexpectedEOF", err)
 	}
 }
 
-func TestDecodeZeroLengthIsError(t *testing.T) {
-	var header [4]byte
-	binary.LittleEndian.PutUint32(header[:], 0)
-	_, err := DecodeRecord(bytes.NewReader(header[:]))
-	if err == nil {
-		t.Fatalf("DecodeRecord on zero-length record: err = nil, want error")
+func TestDecodeZeroLengthIsCorrupt(t *testing.T) {
+	// length = 0 is impossible for a real record (a body always holds the type byte).
+	var prefix [LengthFieldSize + CRCFieldSize]byte
+	binary.LittleEndian.PutUint32(prefix[0:LengthFieldSize], 0)
+	_, err := DecodeRecord(bytes.NewReader(prefix[:]))
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("DecodeRecord on zero-length record: err = %v, want ErrCorruptRecord", err)
+	}
+}
+
+func TestDecodeDetectsCorruptedPayload(t *testing.T) {
+	buf := frame(RecordTypeRaw, []byte("durable payload"))
+	buf[RecordHeaderSize+2] ^= 0xFF // flip a byte in the payload; CRC no longer matches
+	_, err := DecodeRecord(bytes.NewReader(buf))
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("DecodeRecord on corrupted payload: err = %v, want ErrCorruptRecord", err)
+	}
+}
+
+func TestDecodeDetectsCorruptedType(t *testing.T) {
+	buf := frame(RecordTypeRaw, []byte("durable payload"))
+	buf[LengthFieldSize+CRCFieldSize] ^= 0xFF // flip the type byte; it is covered by the CRC
+	_, err := DecodeRecord(bytes.NewReader(buf))
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("DecodeRecord on corrupted type byte: err = %v, want ErrCorruptRecord", err)
+	}
+}
+
+func TestDecodeDetectsCorruptedCRCField(t *testing.T) {
+	buf := frame(RecordTypeRaw, []byte("durable payload"))
+	buf[LengthFieldSize] ^= 0xFF // flip a byte of the stored CRC itself
+	_, err := DecodeRecord(bytes.NewReader(buf))
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("DecodeRecord on corrupted crc field: err = %v, want ErrCorruptRecord", err)
+	}
+}
+
+func TestDecodeOverlongLengthIsCorrupt(t *testing.T) {
+	// A corrupted length far beyond MaxPayloadSize must be rejected as corruption
+	// before any allocation, never trusted into a multi-gigabyte make([]byte, ...).
+	var prefix [LengthFieldSize + CRCFieldSize]byte
+	binary.LittleEndian.PutUint32(prefix[0:LengthFieldSize], 0xFFFFFFFF)
+	_, err := DecodeRecord(bytes.NewReader(prefix[:]))
+	if !errors.Is(err, ErrCorruptRecord) {
+		t.Fatalf("DecodeRecord on overlong length: err = %v, want ErrCorruptRecord", err)
 	}
 }

@@ -27,7 +27,7 @@ The whole system rests on one invariant:
 
 > The intent to perform a side effect is written and `fsync`-ed to disk *before* the side effect is invoked.
 
-If you flip those two — invoke first, log after — a crash in between leaves you with a side effect that happened in the world with no record of it, and the retry will execute it a second time. That is the canonical bug durable execution exists to prevent. The full sequence is walked through in [`docs/architecture.md`](./docs/architecture.md).
+If you flip those two — invoke first, log after — a crash in between leaves you with a side effect that happened in the world with no record of it, and the retry will execute it a second time. That is the canonical bug durable execution exists to prevent.
 
 ## System architecture
 
@@ -64,7 +64,7 @@ If the process crashes between 1 and 3, **replay** sees an intent without a matc
 
 ## The WAL
 
-The WAL package is the foundation everything else sits on. Today it implements **L1**: framing, append, sequential read. Layers L2 (checksums), L3 (crash recovery), L4 (group commit) are next.
+The WAL package is the foundation everything else sits on. Today it implements **L1** (framing, append, sequential read) and **L2** (a CRC32 on every record so torn writes and corruption are detected, never silently trusted). Layers L3 (crash recovery) and L4 (group commit) are next.
 
 ```mermaid
 flowchart TB
@@ -91,12 +91,13 @@ The Writer owns one file descriptor for the entire run. The Reader is created fr
 **On-disk record format:**
 
 ```
-+------------------+----------------+---------------------------+
-| length (4 bytes) | type (1 byte)  | payload (length-1 bytes)  |
-+------------------+----------------+---------------------------+
++------------------+---------------+----------------+---------------------------+
+| length (4 bytes) | crc32 (4 byte)| type (1 byte)  | payload (length-1 bytes)  |
++------------------+---------------+----------------+---------------------------+
 ```
 
-- `length` — `uint32` little-endian. Total size of `(type + payload)`, not including itself.
+- `length` — `uint32` little-endian. Size of the body `(type + payload)`, not including itself or the crc.
+- `crc32` — `uint32` little-endian. IEEE CRC32 of the body `(type + payload)`. On read, the reader recomputes it and compares; a mismatch (or malformed framing) returns `ErrCorruptRecord` and halts replay at that record. The length and crc fields are not themselves covered — a corrupted length is instead caught by the body read coming up short or the recomputed checksum failing.
 - `type` — 1-byte tag. Today only `RecordTypeRaw = 0x01`. L6 adds `RunStart`, `ModelCallIntent`, `ToolCallResult`, etc.
 - `payload` — arbitrary bytes.
 
@@ -145,12 +146,13 @@ hexdump -C durable.log
 ```
 
 ```
-00000000  03 00 00 00 01 68 69 03  00 00 00 01 6d 79 05 00  |.....hi.....my..|
-00000010  00 00 01 6e 61 6d 65 03  00 00 00 01 69 73 09 00  |...name.....is..|
-...
+00000000  03 00 00 00 76 8b c9 67  01 68 69 03 00 00 00 57  |....v..g.hi....W|
+00000010  6f 09 07 01 6d 79 05 00  00 00 b7 7f 25 84 01 6e  |o...my......%..n|
+00000020  61 6d 65 03 00 00 00 4d  43 b0 83 01 69 73 09 00  |ame....MC...is..|
+00000030  00 00 68 9b 9e 40 01 70  72 61 73 68 61 6e 74     |..h..@.prashant|
 ```
 
-`03 00 00 00` = length 3 (little-endian). `01` = `RecordTypeRaw`. `68 69` = `"hi"`. Each record is exactly `5 + len(payload)` bytes on disk.
+`03 00 00 00` = length 3 (little-endian). `76 8b c9 67` = CRC32 of the body. `01` = `RecordTypeRaw`. `68 69` = `"hi"`. Each record is exactly `9 + len(payload)` bytes on disk.
 
 Run the test suite:
 
