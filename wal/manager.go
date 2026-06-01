@@ -7,16 +7,30 @@ import (
 )
 
 type Manager struct {
-	path string
-	w    *Writer
+	path     string
+	w        *Writer
+	recovery RecoveryResult
 }
 
 func NewManager(path string) (*Manager, error) {
+	// Recover before opening the writer so its append handle lands at the clean EOF.
+	// A corrupt log is repaired, not rejected — failing here would make it unopenable.
+	recovery, err := recoverLog(path)
+	if err != nil {
+		return nil, fmt.Errorf("wal: recover %q: %w", path, err)
+	}
+
 	w, err := NewWriter(path)
 	if err != nil {
 		return nil, fmt.Errorf("wal: new manager at %q: %w", path, err)
 	}
-	return &Manager{path: path, w: w}, nil
+	return &Manager{path: path, w: w, recovery: recovery}, nil
+}
+
+// Recovery reports what the startup recovery pass did, so callers can surface a
+// ReasonCorrupt truncation.
+func (m *Manager) Recovery() RecoveryResult {
+	return m.recovery
 }
 
 func (m *Manager) Append(r Record) error {
@@ -35,10 +49,8 @@ func (m *Manager) Replay(fn func(Record) error) error {
 		if errors.Is(err, io.EOF) {
 			return nil
 		}
-		// Corruption (bad CRC or malformed framing) halts replay at the first bad
-		// record: every good record before it has already been delivered to fn, but
-		// nothing past it is trusted. Surfacing the error keeps the "no silent
-		// corruption" invariant; reclaiming the log by truncation is L3's job.
+		// Halt at the first corrupt record: records before it are already delivered,
+		// nothing past it is trusted. (Recovery normally truncates this away first.)
 		if errors.Is(err, ErrCorruptRecord) {
 			return fmt.Errorf("wal: replay stopped at corrupt record: %w", err)
 		}

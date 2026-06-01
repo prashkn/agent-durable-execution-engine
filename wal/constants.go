@@ -1,27 +1,16 @@
 package wal
 
-// On-disk record layout:
-//
-//	[length:uint32 little-endian][crc32:uint32 little-endian][type:uint8][payload:length-1 bytes]
-//
-// length is the size of the body (type + payload), not including itself or the crc.
-// crc32 is the IEEE CRC32 of the body bytes (type + payload). It does not cover the
-// length or crc fields themselves; a corrupted length is caught instead by the body
-// read mismatching (short read) or by the recomputed checksum failing.
+import "fmt"
+
+// On-disk record layout: [length:u32 LE][crc32:u32 LE][type:u8][payload].
+// length covers the body (type + payload); crc32 is over the body only.
 const (
-	// LengthFieldSize is the width of the leading little-endian length field.
-	LengthFieldSize = 4
-	// CRCFieldSize is the width of the little-endian CRC32 field that follows length.
-	CRCFieldSize = 4
-	// RecordHeaderSize is the fixed on-disk header: length + crc + type tag.
+	LengthFieldSize  = 4
+	CRCFieldSize     = 4
 	RecordHeaderSize = LengthFieldSize + CRCFieldSize + 1
 
-	// MaxPayloadSize bounds a single record's payload. The 4-byte length field can
-	// address ~4 GiB, but we never trust it that far: the CRC covers the body, not
-	// the length prefix, so a single flipped bit in the length of a corrupt record
-	// could otherwise drive a multi-gigabyte allocation before the checksum is even
-	// computed. Capping at a realistic ceiling turns that into an immediate
-	// ErrCorruptRecord instead of an OOM. Raise this if a real record ever needs to.
+	// A corrupt length field could otherwise drive a huge allocation before the CRC
+	// is checked, so cap the payload well below what the u32 length can address.
 	MaxPayloadSize uint32 = 16 << 20 // 16 MiB
 )
 
@@ -29,3 +18,27 @@ const (
 const (
 	RecordTypeRaw uint8 = 0x01
 )
+
+// RecoveryReason says how the startup recovery pass ended its scan. The two truncating
+// reasons are distinguished only so callers can stay quiet on a benign torn tail but
+// surface genuine corruption.
+type RecoveryReason uint8
+
+const (
+	ReasonClean    RecoveryReason = iota // decoded to EOF; nothing truncated
+	ReasonTornTail                       // partial tail record truncated (crash mid-append)
+	ReasonCorrupt                        // bad checksum/framing; truncated to last good record
+)
+
+func (r RecoveryReason) String() string {
+	switch r {
+	case ReasonClean:
+		return "clean"
+	case ReasonTornTail:
+		return "torn-tail"
+	case ReasonCorrupt:
+		return "corrupt"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(r))
+	}
+}

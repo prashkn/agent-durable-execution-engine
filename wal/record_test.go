@@ -9,8 +9,7 @@ import (
 	"testing"
 )
 
-// frame builds a valid on-disk record frame with a correct CRC, for tests that
-// then deliberately corrupt or truncate it.
+// frame builds a valid record frame for tests that then corrupt or truncate it.
 func frame(typ uint8, payload []byte) []byte {
 	rec := Record{Type: typ, Payload: payload}
 	encoded, err := rec.Encode()
@@ -50,7 +49,6 @@ func TestRecordRoundTrip(t *testing.T) {
 				t.Fatalf("length field = %d, want %d", gotLen, wantLen)
 			}
 
-			// Body = [type][payload]; the CRC field must match a fresh checksum of it.
 			body := encoded[LengthFieldSize+CRCFieldSize:]
 			gotCRC := binary.LittleEndian.Uint32(encoded[LengthFieldSize : LengthFieldSize+CRCFieldSize])
 			if wantCRC := crc32.ChecksumIEEE(body); gotCRC != wantCRC {
@@ -90,7 +88,7 @@ func TestDecodeTruncatedHeaderReturnsUnexpectedEOF(t *testing.T) {
 }
 
 func TestDecodeTruncatedPayloadReturnsUnexpectedEOF(t *testing.T) {
-	// A complete frame with a 9-byte payload, cut so only 3 payload bytes survive.
+	// Cut a 9-byte payload down to 3 surviving bytes.
 	full := frame(RecordTypeRaw, []byte{0, 1, 2, 3, 4, 5, 6, 7, 8})
 	truncated := full[:RecordHeaderSize+3]
 	_, err := DecodeRecord(bytes.NewReader(truncated))
@@ -100,7 +98,7 @@ func TestDecodeTruncatedPayloadReturnsUnexpectedEOF(t *testing.T) {
 }
 
 func TestDecodeZeroLengthIsCorrupt(t *testing.T) {
-	// length = 0 is impossible for a real record (a body always holds the type byte).
+	// A real body always holds at least the type byte, so length 0 is impossible.
 	var prefix [LengthFieldSize + CRCFieldSize]byte
 	binary.LittleEndian.PutUint32(prefix[0:LengthFieldSize], 0)
 	_, err := DecodeRecord(bytes.NewReader(prefix[:]))
@@ -137,8 +135,7 @@ func TestDecodeDetectsCorruptedCRCField(t *testing.T) {
 }
 
 func TestDecodeOverlongLengthIsCorrupt(t *testing.T) {
-	// A corrupted length far beyond MaxPayloadSize must be rejected as corruption
-	// before any allocation, never trusted into a multi-gigabyte make([]byte, ...).
+	// A length past MaxPayloadSize must be rejected before any allocation.
 	var prefix [LengthFieldSize + CRCFieldSize]byte
 	binary.LittleEndian.PutUint32(prefix[0:LengthFieldSize], 0xFFFFFFFF)
 	_, err := DecodeRecord(bytes.NewReader(prefix[:]))

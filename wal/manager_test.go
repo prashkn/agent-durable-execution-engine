@@ -67,8 +67,7 @@ func TestManagerReplayStopsAtCorruptRecord(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "corrupt.log")
 
-	// Fixed-width payloads make on-disk offsets deterministic, so we can corrupt a
-	// known record. Each frame is RecordHeaderSize + len(payload) bytes.
+	// Fixed-width payloads keep on-disk offsets deterministic.
 	const n = 8
 	const payloadLen = 6
 	recordSize := RecordHeaderSize + payloadLen
@@ -86,7 +85,16 @@ func TestManagerReplayStopsAtCorruptRecord(t *testing.T) {
 		t.Fatalf("Close #1: %v", err)
 	}
 
-	// Corrupt a byte inside record index 3's payload, as a hex editor would.
+	// Open on the clean log first (recovery is a no-op), then corrupt a record so this
+	// hits Replay's own guard instead of recovery's truncation. Recovery's path is
+	// covered by TestRecoverInteriorCorruption.
+	m2, err := NewManager(path)
+	if err != nil {
+		t.Fatalf("NewManager #2: %v", err)
+	}
+	defer m2.Close()
+
+	// Corrupt a byte inside record 3's payload.
 	const badIdx = 3
 	corruptOffset := badIdx*recordSize + RecordHeaderSize
 	data, err := os.ReadFile(path)
@@ -98,12 +106,6 @@ func TestManagerReplayStopsAtCorruptRecord(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	m2, err := NewManager(path)
-	if err != nil {
-		t.Fatalf("NewManager #2: %v", err)
-	}
-	defer m2.Close()
-
 	var got []Record
 	err = m2.Replay(func(r Record) error {
 		got = append(got, r)
@@ -112,7 +114,6 @@ func TestManagerReplayStopsAtCorruptRecord(t *testing.T) {
 	if !errors.Is(err, ErrCorruptRecord) {
 		t.Fatalf("Replay: err = %v, want ErrCorruptRecord", err)
 	}
-	// Every record before the corrupt one is delivered; nothing at or past it is.
 	if len(got) != badIdx {
 		t.Fatalf("delivered %d records before corruption, want %d", len(got), badIdx)
 	}

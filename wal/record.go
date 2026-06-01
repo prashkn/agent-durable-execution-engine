@@ -19,8 +19,7 @@ func (r Record) Encode() ([]byte, error) {
 	bodyLen := uint32(1 + len(r.Payload))
 	out := make([]byte, RecordHeaderSize+len(r.Payload))
 
-	// Layout: [length:4][crc:4][type:1][payload]. The body is everything from the
-	// type byte onward; the CRC covers exactly that body.
+	// The body is type + payload; the CRC covers exactly that.
 	binary.LittleEndian.PutUint32(out[0:4], bodyLen)
 	body := out[LengthFieldSize+CRCFieldSize:]
 	body[0] = r.Type
@@ -31,9 +30,8 @@ func (r Record) Encode() ([]byte, error) {
 }
 
 func DecodeRecord(rd io.Reader) (Record, error) {
-	// The fixed-width prefix is length + crc; the type byte lives in the body.
 	var prefix [LengthFieldSize + CRCFieldSize]byte
-	// io.ReadFull: returns io.EOF only when zero bytes were read; a partial read becomes io.ErrUnexpectedEOF.
+	// io.ReadFull returns io.EOF only on zero bytes; a partial read is io.ErrUnexpectedEOF.
 	if _, err := io.ReadFull(rd, prefix[:]); err != nil {
 		return Record{}, err
 	}
