@@ -4,11 +4,11 @@ A from-scratch durable execution engine for LLM agents. Single-machine, single-p
 
 > Built to understand durable execution from the inside — not to compete with Temporal, Restate, Inngest, or any of the production systems that already solve this well. If you need durable execution in production, use one of those. If you want to understand *how they work*, this might help.
 
-## The problem, in one line
+## The problem
 
 **Crash-resistant, replayable, auditable LLM agent runs.**
 
-If the process gets killed mid-tool-call and restarted, the agent should resume from exactly where it left off — without losing progress and without re-executing side effects against the outside world.
+If agents gets killed mid-tool-call and restarted, the agent should resume from exactly where it left off — without losing progress and without re-executing side effects against the outside world.
 
 ## Why this matters
 
